@@ -19,14 +19,16 @@ import java.nio.ByteBuffer
 import java.util.HashMap
 
 import scala.collection.JavaConversions._
-
 import org.apache.avro.generic.GenericData.Fixed
-import org.apache.avro.generic.{GenericData, GenericRecord}
+import org.apache.avro.generic.{GenericData, GenericEnumSymbol, GenericFixed, GenericRecord}
 import org.apache.avro.{Schema, SchemaBuilder}
 import org.apache.avro.SchemaBuilder._
 import org.apache.avro.Schema.Type._
+import org.apache.avro.util.Utf8
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types._
+
+import scala.collection.mutable
 
 /**
  * This object contains method that are used to convert sparkSQL schemas to avro schemas and vice
@@ -87,8 +89,17 @@ object SchemaConverters {
             SchemaType(LongType, nullable = false)
           case Seq(t1, t2) if Set(t1, t2) == Set(FLOAT, DOUBLE) =>
             SchemaType(DoubleType, nullable = false)
-          case other => throw new UnsupportedOperationException(
-            s"This mix of union types is not supported (see README): $other")
+          case other =>
+            val types = avroSchema.getTypes
+            val fields = types.map { t =>
+              val schemaType = toSqlType(t)
+              // Add prefix to avoid conflict between variable name and keywords
+              val name = "U_" + t.getName
+              // All the fields mut be nullable.
+              // The union is converted to struct with only one non-null field.
+              StructField(name, schemaType.dataType, true)
+            }
+            SchemaType(StructType(fields), nullable = false)
         }
 
       case other => throw new UnsupportedOperationException(s"Unsupported type $other")
@@ -116,6 +127,16 @@ object SchemaConverters {
       }
     }
     fieldsAssembler.endRecord()
+  }
+
+  private def valueToTypeName(item: Any): String = {
+    item match {
+      case record: GenericRecord => record.getSchema.getName
+      case enum: GenericEnumSymbol => enum.getSchema.getName
+      case fixed: GenericFixed => fixed.getSchema.getName
+      case utf8: Utf8 => "string"
+      case _ => item.getClass.getName
+    }
   }
 
   /**
@@ -196,8 +217,20 @@ object SchemaConverters {
                 case null => null
               }
             }
-          case other => throw new UnsupportedOperationException(
-            s"This mix of union types is not supported (see README): $other")
+          case other =>
+            val typeNames = schema.getTypes.map(_.getName)
+            val fieldConverters = schema.getTypes.map(createConverterToSQL(_))
+            (item: Any) => item match {
+              case null => null
+              case _ =>
+                val tpe = valueToTypeName(item)
+                val values = new Array[Any](typeNames.size)
+                val idx = typeNames.indexOf(tpe)
+                // TODO: handle not found. It should not happen if the logic is correct, but we are not sure about correctness yet.
+                // The error should report tpe, typeNames for the easy of debug
+                values(idx) = fieldConverters(idx)(item)
+                Row.fromSeq(values.toSeq)
+            }
         }
       case other => throw new UnsupportedOperationException(s"invalid avro type: $other")
     }

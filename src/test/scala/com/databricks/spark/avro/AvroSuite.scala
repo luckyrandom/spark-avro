@@ -1,19 +1,20 @@
 package com.databricks.spark.avro
 
-import java.io.{FileNotFoundException, File}
+import java.io.{File, FileNotFoundException}
 import java.nio.ByteBuffer
 import java.sql.Timestamp
+import java.util
 import java.util.UUID
 
 import scala.collection.JavaConversions._
-
 import org.apache.avro.Schema
-import org.apache.avro.Schema.{Type, Field}
+import org.apache.avro.Schema.{Field, Type}
 import org.apache.avro.file.DataFileWriter
-import org.apache.avro.generic.{GenericData, GenericRecord, GenericDatumWriter}
+import org.apache.avro.generic.GenericData.Record
+import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
 import org.apache.commons.io.FileUtils
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.{SQLContext, Row}
+import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.sql.types._
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
@@ -115,14 +116,24 @@ class AvroSuite extends FunSuite with BeforeAndAfterAll {
     }
   }
 
-  test("Incorrect Union Type") {
+  test("Complex Union Type") {
     TestUtils.withTempDir { dir =>
       val BadUnionType = Schema.createUnion(List(Schema.create(Type.INT),Schema.create(Type.STRING)))
       val fixedSchema = Schema.createFixed("fixed_name", "doc", "namespace", 20)
       val fixedUnionType = Schema.createUnion(List(fixedSchema,Schema.create(Type.NULL)))
+
+      val recordSchema01 = Schema.createRecord("record01", "docs", "namespace", false)
+      val recordSchema02 = Schema.createRecord("record02", "docs", "namespace", false)
+      recordSchema01.setFields(Seq(new Field("field", Schema.create(Type.INT), "doc", null)))
+      recordSchema02.setFields(Seq(new Field("field", Schema.create(Type.INT), "doc", null)))
+
+      val UnionOfRecordSchema = Schema.createUnion(List(recordSchema01, recordSchema02, Schema.create(Type.NULL)))
+
       val fields = Seq(new Field("field1", BadUnionType, "doc", null),
         new Field("fixed", fixedUnionType, "doc", null),
-        new Field("bytes", Schema.create(Type.BYTES), "doc", null))
+        new Field("bytes", Schema.create(Type.BYTES), "doc", null),
+        new Field("unionOfRecord", UnionOfRecordSchema, "doc", null))
+
       val schema = Schema.createRecord("name", "docs", "namespace", false)
       schema.setFields(fields)
       val datumWriter = new GenericDatumWriter[GenericRecord](schema)
@@ -131,12 +142,20 @@ class AvroSuite extends FunSuite with BeforeAndAfterAll {
       val avroRec = new GenericData.Record(schema)
       avroRec.put("field1", "Hope that was not load bearing")
       avroRec.put("bytes", ByteBuffer.wrap(Array[Byte]()))
+      val record = new GenericData.Record(recordSchema01)
+      record.put("field", 234)
+      avroRec.put("unionOfRecord", record)
       dataFileWriter.append(avroRec)
       dataFileWriter.flush()
       dataFileWriter.close()
-      intercept[UnsupportedOperationException] {
-        sqlContext.read.avro(s"$dir.avro")
-      }
+      //TODO: Add test for schemas
+      //TODO: Add test for other data types
+      val df = sqlContext.read.avro(s"$dir.avro")
+      val row = df.first()
+      assert(row.get(0) == Row(null, "Hope that was not load bearing"))
+      assert(row.get(1) == null)
+      assert(util.Arrays.equals(row.get(2).asInstanceOf[Array[Byte]], Array[Byte]()))
+      assert(row.get(3) == Row(Row(234), null))
     }
   }
 
